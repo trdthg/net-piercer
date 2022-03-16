@@ -1,0 +1,8 @@
+host = "0.0.0.0"
+port = 7777
+
+[[client]]
+name = "test"
+port = 21001
+protocol = "tcp"
+secret_key = "123456"
