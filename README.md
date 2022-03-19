@@ -1,0 +1,3 @@
+# Working...
+
+- [ ] log: `Options::new().to_file("default.log").to_console(true)`

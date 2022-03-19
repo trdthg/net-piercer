@@ -39,5 +39,5 @@ fn get_super_error() -> Result<(), SuperError> {
 
 #[test]
 fn basic() -> anyhow::Result<()> {
-    Ok(get_super_error().with_context(f)?)
+    Ok(get_super_error().with_context(|| "")?)
 }
