@@ -140,11 +140,16 @@ pub async fn handle_server(fake_server_stream: TcpStream, local_server_addr: Soc
         let mut buf = BytesMut::with_capacity(128);
         let mut map: HashMap<Uuid, UnboundedSender<BytesMut>> = HashMap::new();
         loop {
-            let n = reader.read(&mut buf).await.unwrap_or(0);
+            info!("trying to accept data package");
+            let n = reader
+                .read_buf(&mut buf)
+                .await
+                .with_context(|| "unable to read from fake_server now")
+                .unwrap();
             if n == 0 {
+                warn!("client reader closed");
                 return;
             }
-            info!("trying to accept data package");
             // 监听远程server，接受数据后把数据通过channel发送到receiver
             while let Some(DataPackage { uuid, data }) = DataPackage::try_from_buf(&mut buf) {
                 info!("received package, uuid: {}", uuid);
@@ -165,6 +170,7 @@ pub async fn handle_server(fake_server_stream: TcpStream, local_server_addr: Soc
                     while let Some(mut data) = rx.recv().await {
                         while data.has_remaining() {
                             // 不会全部写入完, 会返回写入的大小
+                            info!("writing req to client");
                             local_server_writer.write_buf(&mut data).await.unwrap();
                         }
                     }
@@ -173,11 +179,13 @@ pub async fn handle_server(fake_server_stream: TcpStream, local_server_addr: Soc
                 let sender = sender.clone();
                 tokio::spawn(async move {
                     loop {
+                        info!("trying to receive response from client");
                         let mut buf = BytesMut::with_capacity(512);
                         let n = local_server_reader.read(&mut buf).await.unwrap_or(0);
                         if n == 0 {
                             break;
                         }
+                        info!("received response from client");
                         sender.send(DataPackage { uuid, data: buf }).unwrap();
                     }
                 });
@@ -193,10 +201,10 @@ pub async fn handle_server(fake_server_stream: TcpStream, local_server_addr: Soc
                 let bin = bincode::serialize(&package).unwrap();
                 let len = bin.len();
                 writer
-                    .write(0xCAFEBABE_u32.to_ne_bytes().as_ref())
+                    .write(0xCAFEBABE_u32.to_le_bytes().as_ref())
                     .await
                     .unwrap();
-                writer.write(&(len as u32).to_ne_bytes()).await.unwrap();
+                writer.write(&(len as u32).to_le_bytes()).await.unwrap();
                 if let Err(_) = writer.write_all(&bin).await {
                     break;
                 }

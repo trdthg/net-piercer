@@ -1,13 +1,13 @@
 use anyhow::{Context, Error, Result};
 use bytes::{Buf, BufMut, BytesMut};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use uuid::Uuid;
@@ -149,60 +149,63 @@ impl Handler {
     pub async fn check_register(&mut self) -> Result<Option<(TcpListener, Uuid)>> {
         let mut buf = BytesMut::new();
         let size = self.stream.read_buf(&mut buf).await?;
-        if let ClientMsg::Register { name, secret } = bincode::deserialize(&buf[..size])
+        match bincode::deserialize(&buf[..size])
             .with_context(|| "failed to deseralize to ClientMsg::Register")?
         {
-            if let Some(client) = self
-                .config
-                .client
-                .iter()
-                .find(|&c| c.name == name && c.secret_key == secret)
-            {
-                // server尝试添加client的注册信息
-                let uuid = Uuid::new_v4();
-                self.clients.lock().unwrap().insert(
-                    uuid,
-                    ClientState {
-                        name: client.name.clone(),
-                    },
-                );
-                // 尝试建立本地server绑定到远程客户端
-                let fake_server_addr = format!("{}:{}", &self.config.host, client.port);
-                let listener = TcpListener::bind(&fake_server_addr)
-                    .await
-                    .with_context(|| {
-                        format!("failed to bind on {} to listen client", &fake_server_addr)
-                    })?;
-                // 尝试返回注册成功信息
-                let res = protocal::ServerMsg::Success { uuid };
-                self.stream
-                    .write_all(
-                        &bincode::serialize(&res)
-                            .with_context(|| "failed to seralize response msg")?,
-                    )
-                    .await
-                    .with_context(|| format!("response to client failed"))?;
-                // 如果上面的过程都正常
-                return Ok(Some((listener, uuid)));
-            } else {
-                error!("failed {name}, {secret}");
-                self.stream
-                    .write_all(
-                        &bincode::serialize(&ServerMsg::Failed {
-                            reason: "your client is not allowed".to_string(),
-                        })
-                        .with_context(|| "seralize response msg(ServerMsg::Failed) failed")?,
-                    )
-                    .await
-                    .with_context(|| format!("response to client failed"))?;
-            }
-        } else {
-            self.stream
-                .write_all(&bincode::serialize(&ServerMsg::Failed {
-                    reason: "your msg is not register".to_string(),
-                })?)
-                .await
-                .with_context(|| format!("response to client failed"))?;
+            ClientMsg::Register { name, secret } => {
+                if let Some(client) = self
+                    .config
+                    .client
+                    .iter()
+                    .find(|&c| c.name == name && c.secret_key == secret)
+                {
+                    // server尝试添加client的注册信息
+                    let uuid = Uuid::new_v4();
+                    self.clients.lock().unwrap().insert(
+                        uuid,
+                        ClientState {
+                            name: client.name.clone(),
+                        },
+                    );
+                    // 尝试建立本地server绑定到远程客户端
+                    let fake_server_addr = format!("{}:{}", &self.config.host, client.port);
+                    let listener =
+                        TcpListener::bind(&fake_server_addr)
+                            .await
+                            .with_context(|| {
+                                format!("failed to bind on {} to listen client", &fake_server_addr)
+                            })?;
+                    // 尝试返回注册成功信息
+                    let res = protocal::ServerMsg::Success { uuid };
+                    self.stream
+                        .write_all(
+                            &bincode::serialize(&res)
+                                .with_context(|| "failed to seralize response msg")?,
+                        )
+                        .await
+                        .with_context(|| format!("response to client failed"))?;
+                    // 如果上面的过程都正常
+                    return Ok(Some((listener, uuid)));
+                } else {
+                    error!("failed {name}, {secret}");
+                    self.stream
+                        .write_all(
+                            &bincode::serialize(&ServerMsg::Failed {
+                                reason: "your client is not allowed".to_string(),
+                            })
+                            .with_context(|| "seralize response msg(ServerMsg::Failed) failed")?,
+                        )
+                        .await
+                        .with_context(|| format!("response to client failed"))?;
+                }
+            } // _ => {
+              //     self.stream
+              //         .write_all(&bincode::serialize(&ServerMsg::Failed {
+              //             reason: "your msg is not register".to_string(),
+              //         })?)
+              //         .await
+              //         .with_context(|| format!("response to client failed"))?;
+              // }
         }
         Ok(None)
     }
@@ -225,13 +228,24 @@ pub async fn handle_connection(
                 info!("user-server channel receiver receivd new package, writing to client");
                 let bin = bincode::serialize(&package).unwrap();
                 client_writer
-                    .write(&0xCAFEBABE_u32.to_ne_bytes())
+                    .write(&0xCAFEBABE_u32.to_le_bytes())
                     .await
                     .unwrap();
-                client_writer.write(&bin.len().to_ne_bytes()).await.unwrap();
+                client_writer
+                    .write(&(bin.len() as u32).to_le_bytes())
+                    .await
+                    .unwrap();
+                debug!(
+                    "aaa: {:?}",
+                    &bin.clone()
+                        .iter_mut()
+                        .map(|x| *x as char)
+                        .collect::<String>()
+                );
                 if let Err(_) = client_writer.write_all(&bin).await {
                     break;
                 }
+                info!("writing success");
             }
         });
 
@@ -240,7 +254,6 @@ pub async fn handle_connection(
         tokio::spawn(async move {
             let mut buf = BytesMut::with_capacity(128);
             loop {
-                info!("trying read from client...");
                 let n = client_reader.read(&mut buf).await.unwrap_or(0);
                 if n == 0 {
                     break;
