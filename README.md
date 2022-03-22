@@ -1,4 +1,4 @@
-# Net Piercer...
+# Net Piercer
 
 一个由rust实现的内网穿透工具，第一版基本完成
 
