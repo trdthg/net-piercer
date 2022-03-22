@@ -12,7 +12,6 @@ use tokio::{
 };
 
 use log::{debug, error, info, warn};
-use net_piercer::init_logger;
 use uuid::Uuid;
 
 /// server
@@ -270,7 +269,7 @@ fn drop_bytes_until_magic_number(buf: &mut BytesMut) {
 }
 
 async fn handle_transport(
-    stream: TcpStream,
+    stream: TcpStream,  // fake_server <- users
     map: Arc<Mutex<HashMap<Uuid, UnboundedSender<BytesMut>>>>,
     sender: UnboundedSender<ForwardPackage>,
 ) {

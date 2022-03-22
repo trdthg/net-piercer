@@ -1,18 +1,22 @@
 use anyhow::{Context, Result};
-use bytes::BytesMut;
+use bytes::{Buf, BytesMut};
 use log::{error, info, warn};
 use serde::Deserialize;
 use std::{
+    collections::HashMap,
     fs::File,
     io::{BufReader, Read},
+    net::SocketAddr,
     path::Path,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::mpsc::{self, UnboundedSender},
 };
+use uuid::Uuid;
 
-use crate::protocal;
+use crate::protocal::{self, DataPackage, ServerMsg};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Client {
@@ -69,19 +73,122 @@ impl Client {
                 .read_buf(&mut buf)
                 .await
                 .with_context(|| format!("waiting for register result timeout"))?;
-            match bincode::deserialize::<protocal::ServerMsg>(&buf[0..size])
-                .with_context(|| format!("deseralize fron register response failed"))?
+            match bincode::deserialize::<ServerMsg>(&buf[0..size])
+                .with_context(|| format!("deseralize from register response failed"))?
             {
                 protocal::ServerMsg::Success { uuid } => {
                     println!("{}", uuid);
+                    let mut server_stream = TcpStream::connect(format!(
+                        "{}:{}",
+                        self.config.server_host, client.remote_port
+                    ))
+                    .await
+                    .with_context(|| "connect to fake server failed")?;
+                    // 开始交互前先发送uuid确认身份
+                    server_stream
+                        .write(
+                            &bincode::serialize(&uuid)
+                                .with_context(|| "failed to seralize uuid")?,
+                        )
+                        .await
+                        .with_context(|| "unable to write to fake_server now")?;
+                    let mut buf = BytesMut::with_capacity(128);
+                    let n = stream.read(&mut buf).await.unwrap();
+                    match bincode::deserialize::<ServerMsg>(&buf[0..n])? {
+                        ServerMsg::CheckPassed => {
+                            // todo!
+                            handle_server(
+                                server_stream,
+                                format!("{}:{}", client.local_ip, client.local_port).parse()?,
+                            )
+                            .await;
+                        }
+                        ServerMsg::CheckFailed { reason } => {
+                            error!("failed to check uuid: {reason}");
+                        }
+                        _ => unimplemented!(),
+                    }
                 }
                 protocal::ServerMsg::Failed { reason } => {
                     println!("{} is not allowed: {}", client.name, reason);
                 }
+                _ => unimplemented!(),
             }
         }
         Ok(())
     }
+}
+
+pub async fn handle_server(fake_server_stream: TcpStream, local_server_addr: SocketAddr) {
+    let (mut reader, mut writer) = fake_server_stream.into_split();
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut buf = BytesMut::with_capacity(128);
+        let mut map: HashMap<Uuid, UnboundedSender<BytesMut>> = HashMap::new();
+        loop {
+            let n = reader.read(&mut buf).await.unwrap_or(0);
+            if n == 0 {
+                return;
+            }
+            // 监听远程server，接受数据后把数据通过channel发送到receiver
+            while let Some(DataPackage { uuid, data }) = DataPackage::try_from_buf(&mut buf) {
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                if !map.contains_key(&uuid) {
+                    map.insert(uuid, tx);
+                }
+                // 接收到数据就从channel发送,准备write到本地server
+                map.get(&uuid).unwrap().send(data).unwrap();
+                // 与本地server建立连接
+                let local_server_stream = TcpStream::connect(local_server_addr)
+                    .await
+                    .expect("failed to connect to local real server");
+                let (mut local_server_reader, mut local_server_writer) =
+                    local_server_stream.into_split();
+                // 尝试向本地server写入数据
+                tokio::spawn(async move {
+                    while let Some(mut data) = rx.recv().await {
+                        while data.has_remaining() {
+                            // 不会全部写入完, 会返回写入的大小
+                            local_server_writer.write_buf(&mut data).await.unwrap();
+                        }
+                    }
+                });
+                // 尝试从本地client读取数据, 读取后就通过channel准备发送给user
+                let sender = sender.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let mut buf = BytesMut::with_capacity(512);
+                        let n = local_server_reader.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        sender.send(DataPackage { uuid, data: buf }).unwrap();
+                    }
+                });
+            }
+        }
+    })
+    .await
+    .unwrap();
+    tokio::spawn(async move {
+        loop {
+            while let Some(package) = receiver.recv().await {
+                // todo
+                let bin = bincode::serialize(&package).unwrap();
+                let len = bin.len();
+                writer
+                    .write(0xCAFEBABE_u32.to_ne_bytes().as_ref())
+                    .await
+                    .unwrap();
+                writer.write(&(len as u32).to_ne_bytes()).await.unwrap();
+                if let Err(_) = writer.write_all(&bin).await {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[cfg(test)]

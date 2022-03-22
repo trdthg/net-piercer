@@ -2,10 +2,10 @@ server_host = "127.0.0.1"
 server_port = 7777
 
 [[client]]
-name = "test"
+name = "fastapi"
 local_ip = "127.0.0.1"
 local_port = 5000
-remote_port = 21001
+remote_port = 5001
 secret_key = "123456"
 
 [[client]]
