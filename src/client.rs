@@ -136,7 +136,7 @@ impl Client {
 pub async fn handle_server(fake_server_stream: TcpStream, local_server_addr: SocketAddr) {
     let (mut reader, mut writer) = fake_server_stream.into_split();
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
+    let h1 = tokio::spawn(async move {
         let mut buf = BytesMut::with_capacity(128);
         let mut map: HashMap<Uuid, UnboundedSender<BytesMut>> = HashMap::new();
         loop {
@@ -170,8 +170,13 @@ pub async fn handle_server(fake_server_stream: TcpStream, local_server_addr: Soc
                     while let Some(mut data) = rx.recv().await {
                         while data.has_remaining() {
                             // 不会全部写入完, 会返回写入的大小
-                            info!("writing req to client");
-                            local_server_writer.write_buf(&mut data).await.unwrap();
+                            info!("|1 => writing req to client");
+                            local_server_writer
+                                .write_buf(&mut data)
+                                .await
+                                .with_context(|| "unable to write to client now")
+                                .unwrap();
+                            info!("|1 => write finished");
                         }
                     }
                 });
@@ -179,27 +184,29 @@ pub async fn handle_server(fake_server_stream: TcpStream, local_server_addr: Soc
                 let sender = sender.clone();
                 tokio::spawn(async move {
                     loop {
-                        info!("trying to receive response from client");
+                        info!("|2 => trying to receive response from client");
                         let mut buf = BytesMut::with_capacity(512);
-                        let n = local_server_reader.read(&mut buf).await.unwrap_or(0);
+                        let n = local_server_reader.read_buf(&mut buf).await.unwrap_or(0);
                         if n == 0 {
                             break;
                         }
-                        info!("received response from client");
+                        info!("|2 => received response from client");
+
+                        info!("|3 => sending response to channel");
                         sender.send(DataPackage { uuid, data: buf }).unwrap();
                     }
                 });
             }
         }
-    })
-    .await
-    .unwrap();
-    tokio::spawn(async move {
+    });
+    let h2 = tokio::spawn(async move {
         loop {
             while let Some(package) = receiver.recv().await {
                 // todo
+                info!("|3 => received response from channel");
                 let bin = bincode::serialize(&package).unwrap();
                 let len = bin.len();
+                info!("|4 => writing response back to fake_server");
                 writer
                     .write(0xCAFEBABE_u32.to_le_bytes().as_ref())
                     .await
@@ -208,11 +215,12 @@ pub async fn handle_server(fake_server_stream: TcpStream, local_server_addr: Soc
                 if let Err(_) = writer.write_all(&bin).await {
                     break;
                 }
+                info!("|4 => write finished");
             }
         }
-    })
-    .await
-    .unwrap();
+    });
+    h1.await.unwrap();
+    h2.await.unwrap();
 }
 
 #[cfg(test)]
