@@ -254,16 +254,23 @@ pub async fn handle_connection(
         tokio::spawn(async move {
             let mut buf = BytesMut::with_capacity(128);
             loop {
-                let n = client_reader.read(&mut buf).await.unwrap_or(0);
+                info!("|3 => trying to read from client");
+                let n = client_reader
+                    .read_buf(&mut buf)
+                    .await
+                    .with_context(|| "unable to read from client now")
+                    .unwrap();
                 if n == 0 {
+                    error!("client closed");
                     break;
                 }
                 while let Some(DataPackage { uuid, data }) = DataPackage::try_from_buf(&mut buf) {
-                    info!("read from client, server-client receiver has processed the package, server received the result, sending to user-server channel receiver");
+                    info!("|3 => read from client, server-client receiver has processed the package, server received the result, sending to user-server channel receiver");
                     if let Some(sender) = map_cloned.lock().unwrap().get(&uuid) {
                         sender.send(data).unwrap();
                     }
                 }
+                info!("|3 => read failed");
             }
         });
 
