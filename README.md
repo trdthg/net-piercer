@@ -16,3 +16,7 @@
 - [ ] bug: client取消连接，server端的fake server依然占据着端口
 
 - [x] feat: 协议尾部标识(可以不要，因为头部含有数据长度)
+
+## 参考
+
+- [ZZDirty - 用Rust语言编写内网穿透程序](http://zzdirty.space/2021/05/21/rust-frp-1/)
