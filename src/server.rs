@@ -97,12 +97,14 @@ impl Handler {
             .map_err(|e| anyhow::anyhow!("{e:?}"))?
             .ok_or(anyhow::Error::msg("client not found"))
             .with_context(|| "client not found")?;
+        info!("a new client has registered, uuid: {}", uuid);
         loop {
             // 等待client再次bind到server
             let (mut stream, addr) = listener
                 .accept()
                 .await
                 .with_context(|| "try to accept failed")?;
+            info!("client is trying to connect to the fake server");
             if !addr.ip().eq(&self.addr.ip()) {
                 stream
                     .write(
@@ -119,18 +121,22 @@ impl Handler {
                     .shutdown()
                     .await
                     .with_context(|| "ip changed, but failed to chutdown this connection")?;
+                info!("client is refused, reason: client's ip has changed");
             }
             let mut buf = BytesMut::new();
             let n = stream.read_buf(&mut buf).await?;
             let r_uuid: Uuid = bincode::deserialize(&buf[0..n])?;
             if !r_uuid.eq(&uuid) {
+                info!("client is refused, reason: client's uuid has chenged");
                 break;
             }
             let res = bincode::serialize(&ServerMsg::CheckPassed)?;
+            info!("res: {:?}", res);
             stream
                 .write(&res)
                 .await
                 .with_context(|| "failed to write register success message back")?;
+            info!("client is accepted");
 
             handle_connection(stream, &listener).await;
         }

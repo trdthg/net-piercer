@@ -56,11 +56,13 @@ impl Client {
 
     pub async fn run(&mut self) -> Result<()> {
         for client in &self.config.client {
+            // 准备注册信息
             let msg = protocal::ClientMsg::Register {
                 name: client.name.clone(),
                 secret: client.secret_key.clone(),
             };
             let server_addr = format!("{}:{}", self.config.server_host, self.config.server_port);
+            // 尝试向server发起注册
             let mut stream = TcpStream::connect(&server_addr)
                 .await
                 .with_context(|| format!("can't connect to frps now: {}", &server_addr))?;
@@ -69,6 +71,7 @@ impl Client {
                 .await
                 .with_context(|| format!("can't send register request to frps"))?;
             let mut buf = BytesMut::new();
+            // 获取注册结果
             let size = stream
                 .read_buf(&mut buf)
                 .await
@@ -77,7 +80,8 @@ impl Client {
                 .with_context(|| format!("deseralize from register response failed"))?
             {
                 protocal::ServerMsg::Success { uuid } => {
-                    println!("{}", uuid);
+                    info!("register success, uuid: {}", uuid);
+                    info!("trying to connect to remote fake server...");
                     let mut server_stream = TcpStream::connect(format!(
                         "{}:{}",
                         self.config.server_host, client.remote_port
@@ -85,18 +89,26 @@ impl Client {
                     .await
                     .with_context(|| "connect to fake server failed")?;
                     // 开始交互前先发送uuid确认身份
+                    info!("checking auth info");
                     server_stream
-                        .write(
+                        .write_all(
                             &bincode::serialize(&uuid)
                                 .with_context(|| "failed to seralize uuid")?,
                         )
                         .await
                         .with_context(|| "unable to write to fake_server now")?;
+                    info!("trying to get the checking response...");
                     let mut buf = BytesMut::with_capacity(128);
-                    let n = stream.read(&mut buf).await.unwrap();
-                    match bincode::deserialize::<ServerMsg>(&buf[0..n])? {
+                    let n = server_stream
+                        .read_buf(&mut buf)
+                        .await
+                        .with_context(|| "unable to read from server now")?;
+                    info!("{:?}", &buf[0..n]);
+                    let check_result: ServerMsg = bincode::deserialize(&buf[0..n])
+                        .with_context(|| "failed to deseralize check response")?;
+                    match check_result {
                         ServerMsg::CheckPassed => {
-                            // todo!
+                            info!("check auth passed, handling data transfer");
                             handle_server(
                                 server_stream,
                                 format!("{}:{}", client.local_ip, client.local_port).parse()?,
@@ -106,11 +118,13 @@ impl Client {
                         ServerMsg::CheckFailed { reason } => {
                             error!("failed to check uuid: {reason}");
                         }
-                        _ => unimplemented!(),
+                        _ => {
+                            error!("server response is valid, this should not be reachable");
+                        }
                     }
                 }
                 protocal::ServerMsg::Failed { reason } => {
-                    println!("{} is not allowed: {}", client.name, reason);
+                    info!("{} is not allowed: {}", client.name, reason);
                 }
                 _ => unimplemented!(),
             }
@@ -130,8 +144,10 @@ pub async fn handle_server(fake_server_stream: TcpStream, local_server_addr: Soc
             if n == 0 {
                 return;
             }
+            info!("trying to accept data package");
             // 监听远程server，接受数据后把数据通过channel发送到receiver
             while let Some(DataPackage { uuid, data }) = DataPackage::try_from_buf(&mut buf) {
+                info!("received package, uuid: {}", uuid);
                 let (tx, mut rx) = mpsc::unbounded_channel();
                 if !map.contains_key(&uuid) {
                     map.insert(uuid, tx);
